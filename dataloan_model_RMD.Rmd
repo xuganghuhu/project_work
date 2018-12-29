@@ -1,0 +1,302 @@
+---
+title: "20181229_dataloan_model"
+author: "hu"
+date: "2018年12月29日"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+## 调包
+library(dplyr)
+#library(devtools)
+library(woe)   
+library(ROSE)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+require(caret)
+library(pROC)
+```
+## 数据贷风险识别模型研究
+
+研究一下数据贷共用的变量，看如何用模型的方法识别风险
+
+```{r cars}
+#载入数据
+#getwd()
+data=read.csv('20181228_dataloan_model.csv')
+head(data)
+dim(data) 
+#summary(data)
+```
+
+
+```{r}
+#数据清洗
+dat<-filter(data,is.na(data$income)==0)
+#summary(dat)
+#dim(dat)
+#names(dat)
+
+#listt<-list(names(dat))
+#listt
+```
+
+```{r}
+#选择变量
+feature_list<-c("MobDr1to4_od30","MobDr1to6_od30","MobDr1to6_od10","income","debt","amountCents","risk","totalGMVAYear","costAYear","feesAyear","month","debtAYear"
+           ,"grossProfit","grossRate","netProfit","actualNetProfit","netProfitAfterCAP","beforeRiskamt","riskScore","afterRiskAmt","software_quota","ccrc_quota",
+           "bankflow_quota","com_quota","limit_before_loan","limit_debt","limit_after_loan")
+
+dat1<-select(dat,feature_list)
+
+#summary(dat1)
+```
+
+```{r}
+# 正负样本分布情况
+table(dat1$MobDr1to6_od10)
+
+# 是否要采用过采样评分样本
+dat1_balanced_both <- ovun.sample(MobDr1to6_od30 ~ ., data = dat1, method = "both", p=0.5,N=1317,seed = 1)$data
+table(dat1_balanced_both$MobDr1to6_od30)
+```
+
+## cross_validation
+```{r}
+#设置随机分配，查分数据为train集和test集#
+dat_cross=dat1_balanced_both
+
+smp_size <- floor(0.7 * nrow(dat_cross))
+set.seed(123)
+train_ind <- sample(seq_len(nrow(dat_cross)), size = smp_size)
+train <- dat_cross[train_ind, ]
+test <- dat_cross[-train_ind, ]
+dim(train)
+dim(test)
+
+#未过采样样本作为验证集
+dat_cross=dat1
+smp_size <- floor(0.7 * nrow(dat_cross))
+set.seed(123)
+train_ind <- sample(seq_len(nrow(dat_cross)), size = smp_size)
+train_o<- dat_cross[train_ind, ]
+test_o<- dat_cross[-train_ind, ]
+dim(train_o)
+dim(test_o)
+
+table(train_o$MobDr1to6_od10)
+table(test_o$MobDr1to6_od10)
+```
+
+## 编写评价函数
+
+```{r}
+library(ROCR)
+model_score_go<-function(pre_bad,test_bad){
+  cf_matrix<-table(pre_bad,test_bad)
+  tp<-cf_matrix[1,1]
+  fp<-cf_matrix[1,2]
+  fn<-cf_matrix[2,1]
+  tn<-cf_matrix[2,2]
+  
+  accurancy<-(tp+tn)/sum(cf_matrix)
+  recall<-tp/(tp+tn)
+  precision<-tp/(tp+fn)
+  
+  pr<-prediction(pre_bad,test_bad)
+  auc=performance(pr,'auc')@y.values
+  
+  output<-list(cf_matrix=cf_matrix,accurancy=accurancy,recall=recall,precision=precision,auc=auc)
+  return(output)
+}
+```
+
+
+## 逻辑回归算法
+
+```{r}
+f_data=select(train,-MobDr1to4_od30,-MobDr1to6_od30)
+fit<-MobDr1to6_od10~.
+
+glm_fist<-glm(fit,family = binomial(link='logit'),data=f_data)
+
+summary(glm_fist)
+
+anova(glm_fist,test='Chisq')
+
+#用train_o调整P切值
+pp<-0.6
+print('原始训练集：')
+glm_preP_traino<-predict(glm_fist,newdata = train_o,type = 'response')
+glm_pre_traino<-ifelse(glm_preP_traino>pp,1,0)
+#table(glm_pre_traino,train_o$MobDr1to6_od10)
+model_score_go(glm_pre_traino,train_o$MobDr1to6_od10)
+
+print('原始测试集:')
+glm_preP_testo<-predict(glm_fist,newdata = test_o,type = 'response')
+glm_pre_test<-ifelse(glm_preP_testo>pp,1,0)
+#table(glm_pre_test,test_o$MobDr1to6_od10)
+model_score_go(glm_pre_test,test_o$MobDr1to6_od10)
+```
+
+## 决策树算法
+```{r}
+f_data=select(train,-MobDr1to4_od30,-MobDr1to6_od30)
+fit<-MobDr1to6_od10~.
+
+dtree<-rpart(fit,minsplit=140, cp=0.03,data=f_data)
+
+#library(rpart.plot) #调出rpart.plot包
+rpart.plot(dtree, type=2,cex=0.8) 
+
+printcp(dtree)
+print(dtree)
+
+#train_o上调整p切点
+pp<-0.6
+print('原始训练集：')
+dtr_preP_traino<-predict(dtree, newdata = train_o)
+dtr_pre_traino<-ifelse(dtr_preP_traino>pp,1,0)
+#table(dtr_pre_traino,train_o$MobDr1to6_od10)
+model_score_go(dtr_pre_traino,train_o$MobDr1to6_od10)
+
+print('原始测试集:')
+dtr_preP_testo<-predict(dtree, newdata = test_o)
+dtr_pretesto<-ifelse(dtr_preP_testo>pp,1,0)
+#table(dtr_pretesto,test_o$MobDr1to6_od10)
+model_score_go(dtr_pretesto,test_o$MobDr1to6_od10)
+
+```
+
+## 随机森林算法
+```{r}
+library(randomForest)
+f_data=select(train,-MobDr1to4_od30,-MobDr1to6_od30)
+fit<-MobDr1to6_od10~.
+
+rf_fit<-randomForest(fit,data = f_data,importance=TRUE)
+
+varImpPlot(rf_fit)
+
+
+#train_o上调整p切点
+pp<-0.6
+print('原始训练集：')
+rf_preP_traino<-predict(rf_fit, newdata = train_o)
+rf_pre_traino<-ifelse(rf_preP_traino>pp,1,0)
+#table(rf_pre_traino,train_o$MobDr1to6_od10)
+model_score_go(rf_pre_traino,train_o$MobDr1to6_od10)
+
+print('原始测试集:')
+rf_preP_testo<-predict(rf_fit, newdata = test_o)
+rf_pre_testo<-ifelse(rf_preP_testo>pp,1,0)
+#table(rf_pre_testo,test_o$MobDr1to6_od10)
+model_score_go(rf_pre_testo,test_o$MobDr1to6_od10)
+
+```
+
+
+
+## knn近邻算法
+
+```{r}
+library(kknn)
+f_data=select(train,-MobDr1to4_od30,-MobDr1to6_od30)
+fit<-MobDr1to6_od10~.
+
+knn_fit<-kknn(fit,train,test,distance=1,kernel="triangular")
+
+summary(knn_fit)
+
+#train_o上调整p切点
+pp<-0.95
+print('KNN算法直接应用测试集：')
+knn_preP_traino<-predict(knn_fit, newdata = train_o)
+knn_pre_traino<-ifelse(knn_preP_traino>pp,1,0)
+#table(rf_pre_traino,train_o$MobDr1to6_od10)
+model_score_go(knn_pre_traino,test_o$MobDr1to6_od10)
+
+```
+
+
+
+## 朴素贝叶斯算法(待研究)
+
+```{r}
+# library(e1071)
+# f_data=select(train,-MobDr1to4_od30,-MobDr1to6_od30)
+# fit<-MobDr1to6_od10~.
+# 
+# bayes_fit<-naiveBayes(fit,data=train_o)
+# 
+# summary(bayes_fit)
+# 
+# 
+# #train_o上调整p切点
+# pp<-0.6
+# print('原始训练集：')
+# bayes_preP_traino<-predict(bayes_fit, newdata = train_o)
+# bayes_pre_traino<-ifelse(bayes_preP_traino>pp,1,0)
+# #table(rf_pre_traino,train_o$MobDr1to6_od10)
+# model_score_go(bayes_pre_traino,test_o$MobDr1to6_od10)
+
+```
+
+
+
+```{r}
+## 研究自动找参数P,没研究出来
+
+# pre_Pbad<-dtr_preP_traino
+# train_bad<-train_o$MobDr1to6_od10
+# compare_df<-data.frame(pre_Pbad,train_bad)
+# #compare_df<-filter(compare_df,is.na(compare_df$pre_Pbad)==0)
+# dim(compare_df)
+# precision_list<-NULL
+# TPR<-NULL
+# FPR<-NULL
+# for (i in seq(from=0,to=1,by=0.1)){
+#   compare_df$pre_bad=ifelse(compare_df$pre_Pbad>i,1,0)
+#   compare_df$tp<-ifelse((compare_df$pre_bad==1)&(train_bad==1),1,0)
+#   compare_df$fp<-ifelse((compare_df$pre_bad==1)&(train_bad==0),1,0)
+#   compare_df$tn<-ifelse((compare_df$pre_bad==0)&(train_bad==0),1,0)
+#   compare_df$fn<-ifelse((compare_df$pre_bad==0)&(train_bad==1),1,0)
+#   precision<-(sum(compare_df$tp)+sum(compare_df$tn))/(sum(compare_df$tp)+ sum(compare_df$tn)+sum(compare_df$fp)+sum(compare_df$fn)) 
+#   TPR<-c(TPR,sum(compare_df$tp)/sum(compare_df$tp)+sum(compare_df$fn))
+#   FPR<-c(FPR,sum(compare_df$fp)/(sum(compare_df$fp))+(sum(compare_df$tn)))
+#   
+# }
+# TPR-FPR
+```
+
+## 支持向量机(待研究)
+```{r}
+# library(e1071)
+# f_data=select(train,-MobDr1to4_od30,-MobDr1to6_od30)
+# fit<-MobDr1to6_od10~.
+# 
+# svm_fit<-svm(fit,data=f_data)#,probability=TRUE)
+# 
+# svm_preP<-predict(svm_fit,f_data)
+# svm_pre<-ifelse(svm_preP>0.9,1,0)
+# table(svm_pre,train$MobDr1to6_od10)
+# 
+# 
+# #train_o上调整p切点
+# svm_preP_traino<-predict(svm_fit,train_o)
+# svm_pre_traino<-ifelse(svm_preP_traino>0.5,1,0)
+# table(svm_pre_traino,train_o$MobDr1to6_od10)
+# train_o$MobDr1to6_od10
+# 
+# svm_preP_testo<-predict(svm_fit, newdata = test_o)
+# svm_pre_testo<-ifelse(svm_preP_testo>0.95,1,0)
+# table(svm_pre_testo,test_o$MobDr1to6_od10)
+
+
+```
+
+
+
+
+
